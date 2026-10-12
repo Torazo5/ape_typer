@@ -31,6 +31,7 @@ describe("typing analysis", () => {
     const events = [event("a", "a", 0, 0), event("b", "b", 1, 100)];
     const result = calculateResult({ duration: 30, seed: 1, prompt: "ab", typedText: "ab", events, elapsed: 6 });
     expect(result.netWpm).toBe(4);
+    expect(result.elapsed).toBe(6);
     expect(result.timeline).toHaveLength(6);
   });
 
@@ -52,4 +53,3 @@ describe("typing analysis", () => {
     expect(analyze(events).map((item) => item.kind)).not.toContain("pace");
   });
 });
-

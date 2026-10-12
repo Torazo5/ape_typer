@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from "react";
 import { calculateResult } from "./lib/analysis";
 import { buildReport, type Report } from "./lib/report";
-import { clearTraces, getLocalResults, getLocalTraces, saveTrace } from "./lib/storage";
+import { clearTraces, getLocalTraces, saveTrace, type Trace } from "./lib/storage";
 import type { KeyEvent, TestDuration, TestResult } from "./lib/types";
 import { createPrompt, spaceAction } from "./lib/words";
 
@@ -78,9 +78,15 @@ function HistoryChart({ history }: { history: TestResult[] }) {
   </section>;
 }
 
-function Statistics({ history, selectedId, onSelect }: { history: TestResult[]; selectedId?: string; onSelect: (id: string) => void }) {
+function ReportTables({ report }: { report: Report }) {
+  return <div className="report-grid">{report.sections.map((section) => <section className="report-section" key={section.title}><h3>{section.title}</h3><dl>{section.rows.map((row) => <div key={row.label}><dt>{row.label}</dt><dd><strong>{row.value}</strong><span>{row.detail}</span></dd></div>)}</dl></section>)}</div>;
+}
+
+function Statistics({ history, traces, selectedId, onSelect }: { history: TestResult[]; traces: Trace[]; selectedId?: string; onSelect: (id: string) => void }) {
   if (!history.length) return <section className="statistics" aria-label="Typing statistics"><p className="eyebrow">Your data</p><h1>Statistics</h1><p className="muted">Finish a test lasting at least 7 seconds to start building your history.</p></section>;
   const selected = history.find((run) => run.id === selectedId) ?? history[0];
+  const selectedTrace = traces.find((trace) => trace.id === selected.id);
+  const runReport = selectedTrace?.events.length ? buildReport({ events: selectedTrace.events, elapsed: selected.elapsed ?? selected.timeline.length }, traces) : undefined;
   const averageWpm = history.reduce((sum, run) => sum + run.netWpm, 0) / history.length;
   const averageAccuracy = history.reduce((sum, run) => sum + run.accuracy, 0) / history.length;
   const bestWpm = Math.max(...history.map((run) => run.netWpm));
@@ -99,6 +105,7 @@ function Statistics({ history, selectedId, onSelect }: { history: TestResult[]; 
           <div><dt>raw speed</dt><dd>{selected.rawWpm} wpm</dd></div><div><dt>consistency</dt><dd>{selected.consistency}%</dd></div><div><dt>correct</dt><dd>{selected.characters.correct}</dd></div><div><dt>incorrect</dt><dd>{selected.characters.incorrect}</dd></div><div><dt>missed</dt><dd>{selected.characters.missed}</dd></div><div><dt>corrections</dt><dd>{selected.corrections}</dd></div>
         </dl>
         {selected.insights.length > 0 && <div className="run-insights"><h3>Run signals</h3>{selected.insights.map((insight) => <p key={insight.title}><strong>{insight.title}</strong>{insight.detail}</p>)}</div>}
+        <section className="historical-analysis"><div className="section-heading"><div><p className="eyebrow">Keystroke analysis</p><h3>Speed, accuracy, and rhythm</h3></div>{runReport && <span className="pill">{runReport.scope}</span>}</div>{runReport ? <ReportTables report={runReport} /> : <p className="muted">This older run retains its summary, but detailed keystrokes are kept only for the newest 50 saved runs.</p>}</section>
       </section>
     </div>
   </section>;
@@ -228,6 +235,7 @@ export default function App() {
   const [result, setResult] = useState<TestResult>();
   const [report, setReport] = useState<Report>();
   const [history, setHistory] = useState<TestResult[]>([]);
+  const [traces, setTraces] = useState<Trace[]>([]);
   const [page, setPage] = useState<Page>("test");
   const [selectedHistoryId, setSelectedHistoryId] = useState<string>();
   const [notice, setNotice] = useState("");
@@ -265,6 +273,7 @@ export default function App() {
     if (!keep) setNotice(`Runs shorter than ${MIN_SAVED_SECONDS} s aren't saved.`);
     (keep ? saveTrace(completed, events) : Promise.resolve()).then(async () => {
       const traces = await getLocalTraces();
+      setTraces(traces);
       setHistory(traces.map((trace) => trace.result));
       // Pool with saved history for per-key and per-transition tests.
       setReport(buildReport({ events, elapsed }, traces.some((trace) => trace.id === completed.id) ? traces : [currentTrace, ...traces]));
@@ -283,7 +292,7 @@ export default function App() {
   }, [duration, finish, status]);
 
   useEffect(() => {
-    const loadHistory = () => getLocalResults().then(setHistory).catch(() => setNotice("This browser is blocking local storage, so results won't be saved."));
+    const loadHistory = () => getLocalTraces().then((savedTraces) => { setTraces(savedTraces); setHistory(savedTraces.map((trace) => trace.result)); }).catch(() => setNotice("This browser is blocking local storage, so results won't be saved."));
     let parked: UnfinishedRun | undefined;
     try {
       parked = JSON.parse(localStorage.getItem(unfinishedKey) ?? "null") ?? undefined;
@@ -411,13 +420,13 @@ export default function App() {
   const selectDuration = (value: TestDuration) => { updateSettings({ duration: value }); newTest(undefined, value); };
   const eraseLocal = async () => {
     if (!window.confirm("Delete all saved results on this device? This can't be undone.")) return;
-    await clearTraces(); setHistory([]); setSelectedHistoryId(undefined); setNotice("Local history cleared.");
+    await clearTraces(); setTraces([]); setHistory([]); setSelectedHistoryId(undefined); setNotice("Local history cleared.");
   };
 
   return <main className={`${status === "running" ? "focus-mode" : ""} blink-${settings.blink}`} style={{ "--caret-ms": `${caretMs[settings.caretSpeed]}ms` } as CSSProperties}>
     <header className="topbar"><a className="brand" href="#top" onClick={(event) => { event.preventDefault(); setPage("test"); newTest(); }}>ape typer</a><nav><button className="nav-link" type="button" onClick={() => setPage("test")} aria-current={page === "test" ? "page" : undefined}>test</button><button className="nav-link" type="button" onClick={() => setPage("statistics")} aria-current={page === "statistics" ? "page" : undefined}>statistics</button></nav></header>
     <div className="shell" id="top">
-      {page === "statistics" ? <Statistics history={history} selectedId={selectedHistoryId} onSelect={setSelectedHistoryId} /> : <>
+      {page === "statistics" ? <Statistics history={history} traces={traces} selectedId={selectedHistoryId} onSelect={setSelectedHistoryId} /> : <>
       {!result ? <section className="test-surface" aria-label="Typing test" onClick={() => inputRef.current?.focus({ preventScroll: true })}>
         <div className="test-topline"><div className="modes" aria-label="Test duration">{durations.map((value) => <button className={duration === value ? "selected" : ""} key={value} onClick={() => selectDuration(value)}>{value}s</button>)}</div><div className="live"><span>{status === "running" ? remaining.toFixed(1) : `${duration}.0`}<small> sec</small></span><span>{typed.length ? Math.round((eventsRef.current.filter((entry) => entry.kind === "input" && entry.correct).length / 5) / Math.max(0.001, (duration - remaining) / 60)) : 0}<small> wpm</small></span></div></div>
         {drillTarget && <p className="drill-label">Focused drill · practicing “{drillTarget}” transitions</p>}
@@ -428,7 +437,7 @@ export default function App() {
         <div className="result-details"><div><span>test type</span><strong>time {result.duration}<small>s</small></strong><em>english</em></div><div><span>raw</span><strong>{result.rawWpm}</strong></div><div><span>characters</span><strong>{result.characters.correct}/{result.characters.incorrect}/{result.characters.extra}/{result.characters.missed}</strong></div><div><span>consistency</span><strong>{result.consistency}<small>%</small></strong></div><div><span>time</span><strong>{result.timeline.length}<small>s</small></strong></div></div>
         <section className="insights"><div className="section-heading"><div><p className="eyebrow">Statistical readout</p><h2>Findings</h2></div>{report && <span className="pill">{report.scope}</span>}</div>
           {report?.findings.length ? <div className="finding-list">{report.findings.map((finding) => <article className="finding" key={finding.title}><h3>{finding.title}</h3><p className="finding-evidence">{finding.evidence}</p><p>{finding.advice}</p></article>)}</div> : <div className="empty-insight"><strong>No statistically significant pattern yet.</strong><span>A finding appears only when its test reaches p &lt; 0.05 after Holm correction and meets its minimum sample size. Saved tests are pooled, so findings get sharper as you keep typing.</span></div>}
-          {report && <div className="report-grid">{report.sections.map((section) => <section className="report-section" key={section.title}><h3>{section.title}</h3><dl>{section.rows.map((row) => <div key={row.label}><dt>{row.label}</dt><dd><strong>{row.value}</strong><span>{row.detail}</span></dd></div>)}</dl></section>)}</div>}
+          {report && <ReportTables report={report} />}
         </section>
         <div className="result-actions"><button className="text-action" onClick={() => newTest()}>↻ retry</button><button className="text-action" onClick={() => newTest(report?.findings.find((finding) => finding.target)?.target ?? result.drillTarget)}>⌁ practice weak spot</button></div>
       </section>}

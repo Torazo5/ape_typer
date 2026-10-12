@@ -25,6 +25,7 @@ export type TestResult = {
   id: string;
   createdAt: string;
   duration: TestDuration;
+  elapsed?: number;
   seed: number;
   prompt: string;
   netWpm: number;

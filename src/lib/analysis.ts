@@ -125,6 +125,7 @@ export function calculateResult(input: {
     id: crypto.randomUUID(),
     createdAt: new Date().toISOString(),
     duration: input.duration,
+    elapsed: seconds,
     seed: input.seed,
     prompt: input.prompt,
     netWpm: round(netWpm),
