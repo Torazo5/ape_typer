@@ -244,7 +244,8 @@ export function buildReport(current: { events: KeyEvent[]; elapsed: number }, tr
   } else rhythm.push(notEnough("post-error slowing", `${MIN_GROUP} keys typed right after an error, have ${afterError.length}`));
 
   // Pooled history: per-key error rates and per-transition latency, normalized per test.
-  const pooledTraces = traces;
+  // Older runs keep only their summary; they count toward the speed trend but not the pooled keystroke tests.
+  const pooledTraces = traces.filter((trace) => trace.events.length);
   const pooledInputs = pooledTraces.flatMap((trace) => trace.events.filter((event) => event.kind === "input"));
   const relativeFlow = pooledTraces.flatMap((trace) => {
     const traceFlow = transitions(trace.events).filter(isFlow);
@@ -304,7 +305,7 @@ export function buildReport(current: { events: KeyEvent[]; elapsed: number }, tr
   history.push(slowestBigram
     ? { label: "slowest transition", value: `“${show(slowestBigram.bigram[0])}${show(slowestBigram.bigram[1])}” ${slowestBigram.ratio.toFixed(2)}×`, detail: `median relative to each test's typical interval · n = ${slowestBigram.n}` }
     : notEnough("slowest transition", `${MIN_BIGRAM} clean samples of one letter pair`));
-  const chronological = pooledTraces.map((trace) => trace.result).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  const chronological = traces.map((trace) => trace.result).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   if (chronological.length >= MIN_TESTS_FOR_TREND) {
     const trend = regression(chronological.map((_, index) => index), chronological.map((result) => result.netWpm));
     const verdict = trend.low > 0 ? "improving" : trend.high < 0 ? "declining" : "no clear trend (CI spans 0)";

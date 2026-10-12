@@ -2,6 +2,7 @@ import type { KeyEvent, TestResult } from "./types";
 
 const DB = "typetrace";
 const STORE = "traces";
+const DETAILED_TRACES = 50;
 
 export type Trace = { id: string; result: TestResult; events: KeyEvent[] };
 
@@ -23,8 +24,12 @@ export async function saveTrace(result: TestResult, events: KeyEvent[]) {
     transaction.oncomplete = () => resolve();
     transaction.onerror = () => reject(transaction.error);
   });
-  const records = await readTraces(db);
-  for (const record of records.slice(50)) db.transaction(STORE, "readwrite").objectStore(STORE).delete(record.id);
+  // Every result summary is kept; only the newest 50 keep their full keystroke trace.
+  const slimmed = (await readTraces(db)).slice(DETAILED_TRACES).filter((record) => record.events.length);
+  if (slimmed.length) {
+    const transaction = db.transaction(STORE, "readwrite");
+    for (const record of slimmed) transaction.objectStore(STORE).put({ ...record, events: [] } satisfies Trace);
+  }
   db.close();
 }
 

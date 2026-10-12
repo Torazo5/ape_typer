@@ -50,3 +50,13 @@ describe("statistical report", () => {
     expect(accuracy?.rows.find((row) => row.label === "KSPC")?.value).toBe("2.000");
   });
 });
+
+describe("history pooling", () => {
+  it("uses summary-only runs for the trend but not for keystroke tests", () => {
+    const events = [input("a", "a", 100), input("b", "b", 200)];
+    const summaries = Array.from({ length: 5 }, (_, i) => ({ events: [], result: { createdAt: `2026-01-0${i + 1}`, netWpm: 40 + i } as TestResult }));
+    const history = buildReport({ events, elapsed: 15 }, [trace(events), ...summaries]).sections.find((section) => section.title === "History");
+    expect(history?.rows.find((row) => row.label === "pooled sample")?.value).toBe("1 test");
+    expect(history?.rows.find((row) => row.label === "speed trend")?.detail).toContain("over 6 tests");
+  });
+});

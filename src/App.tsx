@@ -1,19 +1,22 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from "react";
 import { calculateResult } from "./lib/analysis";
-import { connectGoogle, firebaseEnabled, saveCloudResult, startGuest, watchUser } from "./lib/firebase";
 import { buildReport, type Report } from "./lib/report";
 import { clearTraces, getLocalResults, getLocalTraces, saveTrace } from "./lib/storage";
 import type { KeyEvent, TestDuration, TestResult } from "./lib/types";
 import { createPrompt, spaceAction } from "./lib/words";
-import type { User } from "firebase/auth";
 
 type Status = "ready" | "running" | "finished";
+type Page = "test" | "statistics";
 const durations: TestDuration[] = [15, 30, 45];
 
 type Settings = { duration: TestDuration; caretSpeed: "off" | "fast" | "medium" | "slow"; blink: "smooth" | "hard"; pace: "off" | "average" | "custom"; paceWpm: number };
 const defaultSettings: Settings = { duration: 30, caretSpeed: "medium", blink: "smooth", pace: "off", paceWpm: 60 };
 const caretMs: Record<Settings["caretSpeed"], number> = { off: 0, fast: 85, medium: 100, slow: 150 };
 const settingsKey = "ape-typer-settings";
+const unfinishedKey = "ape-typer-unfinished";
+/** Shorter runs are mostly restarts; they still show results but stay out of history and stats. */
+const MIN_SAVED_SECONDS = 7;
+type UnfinishedRun = { duration: TestDuration; seed: number; prompt: string; typedText: string; events: KeyEvent[]; elapsed: number };
 
 function loadSettings(): Settings {
   try {
@@ -23,19 +26,81 @@ function loadSettings(): Settings {
   catch { return defaultSettings; }
 }
 
+function chartIndex(event: { currentTarget: SVGSVGElement; clientX: number }, length: number) {
+  const bounds = event.currentTarget.getBoundingClientRect();
+  return Math.max(0, Math.min(length - 1, Math.round(((event.clientX - bounds.left) / bounds.width) * (length - 1))));
+}
+
 function LineChart({ result }: { result: TestResult }) {
   const [raw, setRaw] = useState(false);
+  const [activeIndex, setActiveIndex] = useState<number | null>(null);
   const points = result.timeline;
   const max = Math.max(1, ...points.map((point) => Math.max(point.wpm, raw ? point.rawWpm : 0)));
   const path = (key: "wpm" | "rawWpm" | "accuracy", scale = max) => points.map((point, index) => `${(index / Math.max(1, points.length - 1)) * 100},${100 - (point[key] / scale) * 92}`).join(" ");
+  const activePoint = activeIndex === null ? undefined : points[activeIndex];
+  const activeX = activeIndex === null ? 0 : (activeIndex / Math.max(1, points.length - 1)) * 100;
+  const activeWpm = activePoint ? 100 - ((raw ? activePoint.rawWpm : activePoint.wpm) / max) * 92 : 0;
+  const activeAccuracy = activePoint ? 100 - (activePoint.accuracy / 100) * 92 : 0;
+  const tooltipShift = activeIndex === 0 ? "0" : activeIndex === points.length - 1 ? "-100%" : "-50%";
   return <section className="result-chart" aria-label="Typing pace chart">
     <div className="chart-topline"><span><i className="legend-line speed" />{raw ? "raw wpm" : "net wpm"}</span><span><i className="legend-line accuracy" />accuracy</span><button className="chart-switch" onClick={() => setRaw(!raw)}>{raw ? "net" : "raw"}</button></div>
-    <svg className="chart" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="Line graph of words per minute and accuracy over time">
+    <svg className="chart" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="Line graph of words per minute and accuracy over time" onPointerMove={(event) => setActiveIndex(chartIndex(event, points.length))} onPointerDown={(event) => setActiveIndex(chartIndex(event, points.length))} onPointerLeave={() => setActiveIndex(null)}>
       <line x1="0" y1="20" x2="100" y2="20" /><line x1="0" y1="60" x2="100" y2="60" />
       <polyline points={path(raw ? "rawWpm" : "wpm")} className="speed-path" />
       <polyline points={path("accuracy", 100)} className="accuracy-path" />
+      {activePoint && <><line className="chart-marker" x1={activeX} y1="0" x2={activeX} y2="100" /><circle className="speed-dot" cx={activeX} cy={activeWpm} r="1.5" /><circle className="accuracy-dot" cx={activeX} cy={activeAccuracy} r="1.5" /></>}
     </svg>
+    {activePoint && <div className="chart-tooltip" role="status" style={{ left: `${activeX}%`, transform: `translateX(${tooltipShift})` }}><strong>{activePoint.second}s</strong><span>{activePoint.wpm} net · {activePoint.rawWpm} raw · {activePoint.accuracy}% acc</span></div>}
     <div className="chart-foot"><span>1s</span><span>{result.timeline.length}s</span></div>
+  </section>;
+}
+
+function HistoryChart({ history }: { history: TestResult[] }) {
+  const [activeIndex, setActiveIndex] = useState<number | null>(null);
+  const runs = [...history].reverse();
+  const maxWpm = Math.max(1, ...runs.map((run) => run.netWpm));
+  const path = (value: (run: TestResult) => number, scale: number) => runs.map((run, index) => `${(index / Math.max(1, runs.length - 1)) * 100},${100 - (value(run) / scale) * 92}`).join(" ");
+  const activeRun = activeIndex === null ? undefined : runs[activeIndex];
+  const activeX = activeIndex === null ? 0 : (activeIndex / Math.max(1, runs.length - 1)) * 100;
+  const activeWpm = activeRun ? 100 - (activeRun.netWpm / maxWpm) * 92 : 0;
+  const activeAccuracy = activeRun ? 100 - (activeRun.accuracy / 100) * 92 : 0;
+  const tooltipShift = activeIndex === 0 ? "0" : activeIndex === runs.length - 1 ? "-100%" : "-50%";
+  return <section className="history-chart" aria-label="Progress across saved typing tests">
+    <div className="chart-topline"><span><i className="legend-line speed" />net wpm</span><span><i className="legend-line accuracy" />accuracy</span></div>
+    <svg className="chart" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="Line graph of net words per minute and accuracy across saved tests" onPointerMove={(event) => setActiveIndex(chartIndex(event, runs.length))} onPointerDown={(event) => setActiveIndex(chartIndex(event, runs.length))} onPointerLeave={() => setActiveIndex(null)}>
+      <line x1="0" y1="20" x2="100" y2="20" /><line x1="0" y1="60" x2="100" y2="60" />
+      <polyline points={path((run) => run.netWpm, maxWpm)} className="speed-path" />
+      <polyline points={path((run) => run.accuracy, 100)} className="accuracy-path" />
+      {activeRun && <><line className="chart-marker" x1={activeX} y1="0" x2={activeX} y2="100" /><circle className="speed-dot" cx={activeX} cy={activeWpm} r="1.5" /><circle className="accuracy-dot" cx={activeX} cy={activeAccuracy} r="1.5" /></>}
+    </svg>
+    {activeRun && <div className="chart-tooltip" role="status" style={{ left: `${activeX}%`, transform: `translateX(${tooltipShift})` }}><strong>{new Date(activeRun.createdAt).toLocaleDateString()}</strong><span>{activeRun.netWpm} wpm · {activeRun.accuracy}% acc · {activeRun.timeline.length}s</span></div>}
+    <div className="chart-foot"><span>first saved run</span><span>latest</span></div>
+  </section>;
+}
+
+function Statistics({ history, selectedId, onSelect }: { history: TestResult[]; selectedId?: string; onSelect: (id: string) => void }) {
+  if (!history.length) return <section className="statistics" aria-label="Typing statistics"><p className="eyebrow">Your data</p><h1>Statistics</h1><p className="muted">Finish a test lasting at least 7 seconds to start building your history.</p></section>;
+  const selected = history.find((run) => run.id === selectedId) ?? history[0];
+  const averageWpm = history.reduce((sum, run) => sum + run.netWpm, 0) / history.length;
+  const averageAccuracy = history.reduce((sum, run) => sum + run.accuracy, 0) / history.length;
+  const bestWpm = Math.max(...history.map((run) => run.netWpm));
+  return <section className="statistics" aria-label="Typing statistics">
+    <div className="section-heading"><div><p className="eyebrow">Your data</p><h1>Statistics</h1></div><span className="pill">{history.length} saved {history.length === 1 ? "run" : "runs"}</span></div>
+    <div className="stat-summary">
+      <div><span>average</span><strong>{averageWpm.toFixed(1)}<small> wpm</small></strong></div>
+      <div><span>best</span><strong>{bestWpm}<small> wpm</small></strong></div>
+      <div><span>accuracy</span><strong>{averageAccuracy.toFixed(1)}<small>%</small></strong></div>
+    </div>
+    {history.length > 1 && <HistoryChart history={history} />}
+    <div className="statistics-detail">
+      <section className="run-list" aria-label="Past typing runs"><h2>Past runs</h2>{history.map((run) => <button className={run.id === selected.id ? "selected" : ""} type="button" key={run.id} onClick={() => onSelect(run.id)} aria-pressed={run.id === selected.id}><strong>{run.netWpm} <small>wpm</small></strong><span>{run.accuracy}% acc · {run.timeline.length}s</span><time>{new Date(run.createdAt).toLocaleString()}</time></button>)}</section>
+      <section className="run-detail" aria-label="Selected typing run"><div className="section-heading"><div><p className="eyebrow">Selected run</p><h2>{new Date(selected.createdAt).toLocaleString()}</h2></div></div><LineChart result={selected} />
+        <dl className="run-metrics">
+          <div><dt>raw speed</dt><dd>{selected.rawWpm} wpm</dd></div><div><dt>consistency</dt><dd>{selected.consistency}%</dd></div><div><dt>correct</dt><dd>{selected.characters.correct}</dd></div><div><dt>incorrect</dt><dd>{selected.characters.incorrect}</dd></div><div><dt>missed</dt><dd>{selected.characters.missed}</dd></div><div><dt>corrections</dt><dd>{selected.corrections}</dd></div>
+        </dl>
+        {selected.insights.length > 0 && <div className="run-insights"><h3>Run signals</h3>{selected.insights.map((insight) => <p key={insight.title}><strong>{insight.title}</strong>{insight.detail}</p>)}</div>}
+      </section>
+    </div>
   </section>;
 }
 
@@ -163,7 +228,8 @@ export default function App() {
   const [result, setResult] = useState<TestResult>();
   const [report, setReport] = useState<Report>();
   const [history, setHistory] = useState<TestResult[]>([]);
-  const [user, setUser] = useState<User | null>(null);
+  const [page, setPage] = useState<Page>("test");
+  const [selectedHistoryId, setSelectedHistoryId] = useState<string>();
   const [notice, setNotice] = useState("");
   const prompt = useMemo(() => createPrompt(seed, drillTarget), [seed, drillTarget]);
 
@@ -186,6 +252,7 @@ export default function App() {
   const finish = useCallback(() => {
     if (finalizedRef.current) return;
     finalizedRef.current = true;
+    try { localStorage.removeItem(unfinishedKey); } catch { /* nothing parked */ }
     const events = eventsRef.current;
     const elapsed = Math.min(duration, (performance.now() - (startRef.current ?? performance.now())) / 1000);
     const completed = calculateResult({ duration, seed, prompt, typedText: typedRef.current, events, elapsed });
@@ -194,14 +261,15 @@ export default function App() {
     setReport(buildReport({ events, elapsed }, [currentTrace]));
     setStatus("finished");
     setRemaining(0);
-    void saveTrace(completed, events).then(async () => {
+    const keep = elapsed >= MIN_SAVED_SECONDS;
+    if (!keep) setNotice(`Runs shorter than ${MIN_SAVED_SECONDS} s aren't saved.`);
+    (keep ? saveTrace(completed, events) : Promise.resolve()).then(async () => {
       const traces = await getLocalTraces();
       setHistory(traces.map((trace) => trace.result));
       // Pool with saved history for per-key and per-transition tests.
       setReport(buildReport({ events, elapsed }, traces.some((trace) => trace.id === completed.id) ? traces : [currentTrace, ...traces]));
-      await saveCloudResult(completed, user);
-    });
-  }, [duration, prompt, seed, user]);
+    }).catch(() => setNotice("Couldn't save this result in this browser."));
+  }, [duration, prompt, seed]);
 
   useEffect(() => {
     if (status !== "running") return;
@@ -215,10 +283,35 @@ export default function App() {
   }, [duration, finish, status]);
 
   useEffect(() => {
-    void getLocalResults().then(setHistory);
-    void startGuest().then(setUser).catch(() => setNotice("Offline mode: results stay on this device."));
-    return watchUser(setUser);
+    const loadHistory = () => getLocalResults().then(setHistory).catch(() => setNotice("This browser is blocking local storage, so results won't be saved."));
+    let parked: UnfinishedRun | undefined;
+    try {
+      parked = JSON.parse(localStorage.getItem(unfinishedKey) ?? "null") ?? undefined;
+      localStorage.removeItem(unfinishedKey);
+    } catch { /* storage blocked or corrupt */ }
+    if (!parked || !Array.isArray(parked.events) || !parked.events.some((event) => event.kind === "input") || !(parked.elapsed >= MIN_SAVED_SECONDS)) { void loadHistory(); return; }
+    const recovered = calculateResult(parked);
+    saveTrace(recovered, parked.events)
+      .then(() => setNotice(`Saved your unfinished run: ${recovered.netWpm} wpm over ${Math.round(recovered.timeline.length)}s.`))
+      .catch(() => setNotice("Couldn't save your unfinished run in this browser."))
+      .finally(loadHistory);
   }, []);
+
+  useEffect(() => {
+    // Refresh or close kills the page before an IndexedDB write can finish, so park the run synchronously
+    // in localStorage; the next load scores and saves it.
+    const park = () => {
+      if (startRef.current === null || finalizedRef.current) return;
+      const elapsed = Math.min(duration, (performance.now() - startRef.current) / 1000);
+      if (elapsed < MIN_SAVED_SECONDS) return;
+      try { localStorage.setItem(unfinishedKey, JSON.stringify({ duration, seed, prompt, typedText: typedRef.current, events: eventsRef.current, elapsed } satisfies UnfinishedRun)); }
+      catch { /* storage blocked: the run is lost */ }
+    };
+    const onVisibilityChange = () => { if (document.visibilityState === "hidden") park(); };
+    window.addEventListener("pagehide", park);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => { window.removeEventListener("pagehide", park); document.removeEventListener("visibilitychange", onVisibilityChange); };
+  }, [duration, seed, prompt]);
 
   const recordInput = (key: string, code: string) => {
     if (status === "finished" || typedRef.current.length >= prompt.length) return;
@@ -316,15 +409,15 @@ export default function App() {
   const paceWpm = settings.pace === "average" ? averageWpm : settings.pace === "custom" ? Math.min(250, Math.max(10, settings.paceWpm || 10)) : 0;
 
   const selectDuration = (value: TestDuration) => { updateSettings({ duration: value }); newTest(undefined, value); };
-  const signIn = async () => {
-    try { await connectGoogle(); setNotice("Google account connected — future summaries will sync."); }
-    catch (error) { setNotice(error instanceof Error ? error.message : "Could not connect Google right now."); }
+  const eraseLocal = async () => {
+    if (!window.confirm("Delete all saved results on this device? This can't be undone.")) return;
+    await clearTraces(); setHistory([]); setSelectedHistoryId(undefined); setNotice("Local history cleared.");
   };
-  const eraseLocal = async () => { await clearTraces(); setHistory([]); setNotice("Detailed local typing traces cleared."); };
 
   return <main className={`${status === "running" ? "focus-mode" : ""} blink-${settings.blink}`} style={{ "--caret-ms": `${caretMs[settings.caretSpeed]}ms` } as CSSProperties}>
-    <header className="topbar"><a className="brand" href="#top" onClick={(event) => { event.preventDefault(); newTest(); }}>ape typer</a><nav><a href="#progress">Progress</a><button className="account" onClick={signIn} disabled={!firebaseEnabled}>{user?.isAnonymous ? "Sync with Google" : user?.displayName ?? "Guest mode"}</button></nav></header>
+    <header className="topbar"><a className="brand" href="#top" onClick={(event) => { event.preventDefault(); setPage("test"); newTest(); }}>ape typer</a><nav><button className="nav-link" type="button" onClick={() => setPage("test")} aria-current={page === "test" ? "page" : undefined}>test</button><button className="nav-link" type="button" onClick={() => setPage("statistics")} aria-current={page === "statistics" ? "page" : undefined}>statistics</button></nav></header>
     <div className="shell" id="top">
+      {page === "statistics" ? <Statistics history={history} selectedId={selectedHistoryId} onSelect={setSelectedHistoryId} /> : <>
       {!result ? <section className="test-surface" aria-label="Typing test" onClick={() => inputRef.current?.focus({ preventScroll: true })}>
         <div className="test-topline"><div className="modes" aria-label="Test duration">{durations.map((value) => <button className={duration === value ? "selected" : ""} key={value} onClick={() => selectDuration(value)}>{value}s</button>)}</div><div className="live"><span>{status === "running" ? remaining.toFixed(1) : `${duration}.0`}<small> sec</small></span><span>{typed.length ? Math.round((eventsRef.current.filter((entry) => entry.kind === "input" && entry.correct).length / 5) / Math.max(0.001, (duration - remaining) / 60)) : 0}<small> wpm</small></span></div></div>
         {drillTarget && <p className="drill-label">Focused drill · practicing “{drillTarget}” transitions</p>}
@@ -347,8 +440,9 @@ export default function App() {
           {settings.pace === "custom" && <label><span>pace wpm</span><input type="number" min={10} max={250} value={settings.paceWpm} onChange={(event) => updateSettings({ paceWpm: Number(event.target.value) })} /></label>}
         </div>
       </section>
-      <section className="progress" id="progress"><div className="section-heading"><div><p className="eyebrow">Recent local history</p><h2>Progress</h2></div><button className="quiet-button danger" onClick={eraseLocal}>Clear detailed traces</button></div>{history.length ? <div className="history-grid">{history.slice(0, 6).map((item) => <article key={item.id}><strong>{item.netWpm}<small> wpm</small></strong><span>{item.accuracy}% acc · {item.duration}s</span><time>{new Date(item.createdAt).toLocaleDateString()}</time></article>)}</div> : <p className="muted">Complete a test to start your private local history.</p>}</section>
-      <aside className="privacy"><strong>Privacy by default.</strong> Keystroke timing and detailed traces remain in this browser. Firebase, when configured, receives only result summaries and pattern cards—not raw keystrokes.</aside></>}
+      <section className="progress" id="progress"><div className="section-heading"><div><p className="eyebrow">Recent local history</p><h2>Progress</h2></div><button className="quiet-button danger" onClick={eraseLocal}>Clear history</button></div>{history.length ? <div className="history-grid">{history.slice(0, 6).map((item) => <article key={item.id}><strong>{item.netWpm}<small> wpm</small></strong><span>{item.accuracy}% acc · {item.timeline.length < item.duration ? `${item.timeline.length}/${item.duration}` : item.duration}s</span><time>{new Date(item.createdAt).toLocaleDateString()}</time></article>)}</div> : <p className="muted">Complete a test to start your private local history.</p>}</section>
+      <aside className="privacy"><strong>Privacy by default.</strong> Everything stays in this browser: no account, no server. Clearing site data or switching browsers starts a fresh history.</aside></>}
+      </>}
       {notice && <div className="notice" role="status">{notice}</div>}
     </div>
   </main>;

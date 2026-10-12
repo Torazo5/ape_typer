@@ -11,12 +11,13 @@ npm install
 npm run dev
 ```
 
-Open the local URL Vite prints. The app works without any account or cloud configuration.
+Open the local URL Vite prints. There are no accounts and no server: everything runs in the browser.
 
 ## What it does
 
 - Choose a 15, 30, or 45 second test. Your choice is remembered in this browser.
 - Start the timer with your first character. Focus mode leaves only the prompt and timer on screen.
+- Every run of 7 seconds or more is saved: finishing, pressing `Esc`, refreshing, or closing the tab mid-run all keep it. An interrupted run is parked in `localStorage` and saved to history on the next load. Shorter runs are treated as restarts: they still show results but are not saved.
 - Follow a caret that glides between characters while the text shifts smoothly at line changes.
 - Use `Space` to skip the unfinished part of a started word, and `Backspace` or `Delete` to move back.
 - Review WPM, accuracy, raw speed, consistency, pace, and evidence-backed practice suggestions.
@@ -26,22 +27,13 @@ Typing input uses `beforeinput`, so hardware keyboards, IME input, dead keys, an
 
 ## Privacy first
 
-Detailed keystroke traces stay in IndexedDB on the device. If Firebase is configured, only aggregate result summaries sync to Firestore; raw timings and the local statistical readout do not.
+Results, keystroke traces, and settings stay in this browser (IndexedDB and `localStorage`); nothing is sent anywhere. Every result summary is kept; the newest 50 runs also keep their full keystroke trace for the statistical readout. History is per browser and per domain, so a deployed copy starts empty and clearing site data erases it.
 
 The IndexedDB database remains named `typetrace` so existing local history survives the app rename.
 
-## Optional Firebase setup
+## Deploy
 
-Copy `.env.example` to `.env.local`, then fill in the `VITE_FIREBASE_*` values. Without them, ape typer stays fully playable in local-only mode.
-
-The Firebase Function is a separate package:
-
-```bash
-npm --prefix functions install
-npm --prefix functions run build
-```
-
-`firestore.rules` restricts result paths to their owner.
+It is a static Vite build: on Vercel, import the repo and keep the detected Vite preset (`npm run build`, output `dist`). No environment variables are needed.
 
 ## Development
 
@@ -56,9 +48,8 @@ npm run build
 | `src/lib/words.ts` | Prompt generation, practice drills, and space behavior. |
 | `src/lib/analysis.ts` | Metrics, pace data, and deterministic insights. |
 | `src/lib/report.ts` | Local statistical readout and significance-tested findings. |
-| `src/lib/storage.ts` | Device-only detailed-trace storage. |
-| `src/lib/firebase.ts` | Optional auth and result-summary sync. |
-| `functions/src/index.ts` | Anonymous-history merge function. |
+| `ANALYSIS.md` | How every score, statistic, and finding is computed, and which data each one uses. |
+| `src/lib/storage.ts` | Device-only result and trace storage. |
 
 ## Contribution notes
 
