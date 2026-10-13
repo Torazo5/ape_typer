@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react";
-import { calculateResult } from "./lib/analysis";
+import { calculateResult, compareRun, referencePercentile, type RunComparison } from "./lib/analysis";
 import { buildReport, standardDeviation, type Finding, type Report, type Section } from "./lib/report";
 import { clearTraces, getLocalTraces, saveTrace, type Trace } from "./lib/storage";
 import type { KeyEvent, TestDuration, TestResult } from "./lib/types";
@@ -122,8 +122,8 @@ function Statistics({ history, traces, selectedId, onSelect }: { history: TestRe
     <section className="overall-statistics" aria-label="All saved typing statistics">
       <div className="section-heading"><div><p className="eyebrow">All saved runs</p><h2>Overall statistics</h2></div></div>
       <div className="stat-summary">
-        <div><span>average</span><strong>{averageWpm.toFixed(1)}<small> wpm</small></strong><em>{history.length > 1 ? `± ${wpmDeviation.toFixed(1)} wpm std. dev.` : "Add another run for spread"}</em></div>
-        <div><span>best</span><strong>{bestWpm}<small> wpm</small></strong><em>Fastest of {history.length} saved {history.length === 1 ? "run" : "runs"}</em></div>
+        <div><span>average</span><strong>{averageWpm.toFixed(1)}<small> wpm</small></strong><em>≈ {referencePercentile(averageWpm)}th percentile · {history.length > 1 ? `± ${wpmDeviation.toFixed(1)} wpm std. dev.` : "Add another run for spread"}</em></div>
+        <div><span>best</span><strong>{bestWpm}<small> wpm</small></strong><em>≈ {referencePercentile(bestWpm)}th percentile · fastest of {history.length} saved {history.length === 1 ? "run" : "runs"}</em></div>
         <div><span>accuracy</span><strong>{averageAccuracy.toFixed(1)}<small>%</small></strong><em>{history.length > 1 ? `± ${accuracyDeviation.toFixed(1)}% std. dev.` : "Add another run for spread"}</em></div>
       </div>
       <section className="history-findings"><div className="section-heading"><div><p className="eyebrow">Letter patterns and progress</p><h2>Findings</h2></div>{overall && <span className="pill">{overall.scope}</span>}</div>
@@ -272,6 +272,7 @@ export default function App({ initialPage = "test" }: { initialPage?: Page }) {
   const [remaining, setRemaining] = useState<number>(duration);
   const [result, setResult] = useState<TestResult>();
   const [report, setReport] = useState<Report>();
+  const [runComparison, setRunComparison] = useState<RunComparison>();
   const [history, setHistory] = useState<TestResult[]>([]);
   const [traces, setTraces] = useState<Trace[]>([]);
   const page = initialPage;
@@ -290,6 +291,7 @@ export default function App({ initialPage = "test" }: { initialPage?: Page }) {
     setTyped("");
     setResult(undefined);
     setReport(undefined);
+    setRunComparison(undefined);
     setStatus("ready");
     setRemaining(nextDuration);
     requestAnimationFrame(() => inputRef.current?.focus({ preventScroll: true }));
@@ -304,6 +306,7 @@ export default function App({ initialPage = "test" }: { initialPage?: Page }) {
     const completed = calculateResult({ duration, seed, prompt, typedText: typedRef.current, events, elapsed });
     const currentTrace = { id: completed.id, result: completed, events };
     setResult(completed);
+    setRunComparison(compareRun(completed, history));
     setReport(buildReport({ events, elapsed }, [currentTrace]));
     setStatus("finished");
     setRemaining(0);
@@ -316,7 +319,7 @@ export default function App({ initialPage = "test" }: { initialPage?: Page }) {
       // Pool with saved history for per-key and per-transition tests.
       setReport(buildReport({ events, elapsed }, traces.some((trace) => trace.id === completed.id) ? traces : [currentTrace, ...traces]));
     }).catch(() => setNotice("Couldn't save this result in this browser."));
-  }, [duration, prompt, seed]);
+  }, [duration, history, prompt, seed]);
 
   useEffect(() => {
     if (status !== "running") return;
@@ -471,7 +474,8 @@ export default function App({ initialPage = "test" }: { initialPage?: Page }) {
         <Prompt prompt={prompt} typed={typed} inputRef={inputRef} paceStart={status === "running" ? startRef.current : null} paceWpm={paceWpm} />
         <div className="test-footer"><span>{status === "ready" ? "Start typing when ready" : "Esc to finish early"}</span><span>{status === "ready" ? "space skips the rest of a word · delete goes back" : ""}</span></div>
       </section> : <section className="results" aria-live="polite">
-        <div className="result-layout"><div className="score-stack"><div><span>wpm</span><strong>{result.netWpm}</strong></div><div><span>acc</span><strong>{result.accuracy}<small>%</small></strong></div></div><LineChart result={result} /></div>
+        {runComparison?.isPersonalBest && <aside className="personal-best-banner"><span>New {runComparison.duration}s personal best</span><strong>+{runComparison.bestDelta!.toFixed(1)}<small> wpm</small></strong><p>above your previous best</p></aside>}
+        <div className="result-layout"><div className="score-stack"><div><span>wpm</span><strong>{result.netWpm}</strong>{runComparison && <em>{`${runComparison.averageDelta >= 0 ? "+" : ""}${runComparison.averageDelta.toFixed(0)}% ${runComparison.averageDelta >= 0 ? "better than" : "below"} your average ${runComparison.duration}s run`}</em>}</div><div><span>acc</span><strong>{result.accuracy}<small>%</small></strong></div></div><LineChart result={result} /></div>
         <div className="result-details"><div><span>test type</span><strong>time {result.duration}<small>s</small></strong><em>english</em></div><div><span>raw</span><strong>{result.rawWpm}</strong></div><div><span>characters</span><strong>{result.characters.correct}/{result.characters.incorrect}/{result.characters.extra}/{result.characters.missed}</strong></div><div><span>consistency</span><strong>{result.consistency}<small>%</small></strong></div><div><span>time</span><strong>{result.timeline.length}<small>s</small></strong></div></div>
         <section className="insights"><div className="section-heading"><div><p className="eyebrow">Statistical readout</p><h2>Findings</h2></div>{report && <span className="pill">{report.scope}</span>}</div>
           {report && <FindingList findings={report.findings} empty={noFindingYet} />}

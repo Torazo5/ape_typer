@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { analyze, calculateResult } from "./analysis";
-import type { KeyEvent } from "./types";
+import { analyze, calculateResult, compareRun, referencePercentile } from "./analysis";
+import type { KeyEvent, TestResult } from "./types";
 
 const event = (actual: string, expected: string, index: number, time: number, gap = 100): KeyEvent => ({
   kind: "input", actual, expected, index, time, gap, correct: actual === expected, code: "KeyA",
 });
+const savedRun = (netWpm: number, duration: TestResult["duration"] = 15): TestResult => ({ id: `${duration}-${netWpm}`, createdAt: "2026-01-01", duration, elapsed: duration, seed: 1, prompt: "", netWpm, rawWpm: netWpm, accuracy: 100, consistency: 100, characters: { correct: 0, incorrect: 0, extra: 0, missed: 0 }, corrections: 0, timeline: [], insights: [] });
 
 describe("typing analysis", () => {
   it("only surfaces a repeat mistake after enough evidence", () => {
@@ -51,5 +52,13 @@ describe("typing analysis", () => {
       events.push(event("b", "b", index * 2 + 1, (time += 100)));
     }
     expect(analyze(events).map((item) => item.kind)).not.toContain("pace");
+  });
+
+  it("compares completed runs only within the same duration", () => {
+    const comparison = compareRun(savedRun(60), [savedRun(50), savedRun(55), savedRun(100, 30)]);
+    expect(comparison).toMatchObject({ duration: 15, isPersonalBest: true, bestDelta: 5 });
+    expect(comparison?.averageDelta).toBeCloseTo(14.29, 2);
+    expect(referencePercentile(51.56)).toBe(50);
+    expect(referencePercentile(136)).toBe(99);
   });
 });

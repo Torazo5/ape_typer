@@ -8,6 +8,29 @@ const median = (values: number[]) => {
   return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
 };
 
+export type RunComparison = { averageDelta: number; bestDelta?: number; duration: TestResult["duration"]; isPersonalBest: boolean };
+
+const completedRun = (result: TestResult) => (result.elapsed ?? result.timeline.length) >= result.duration - 0.1;
+
+/** Compares only full tests of the same selected duration. */
+export function compareRun(result: TestResult, history: TestResult[]): RunComparison | undefined {
+  if (!completedRun(result)) return undefined;
+  const comparable = history.filter((run) => run.duration === result.duration && completedRun(run));
+  if (!comparable.length) return undefined;
+  const average = comparable.reduce((sum, run) => sum + run.netWpm, 0) / comparable.length;
+  const best = Math.max(...comparable.map((run) => run.netWpm));
+  return { averageDelta: average ? ((result.netWpm - average) / average) * 100 : 0, bestDelta: result.netWpm - best, duration: result.duration, isPersonalBest: result.netWpm > best };
+}
+
+// A normal approximation of the 2018 Aalto/Cambridge online typing reference (mean 51.56, SD 20.2).
+// The source distribution is skewed, so this is deliberately presented as an estimate, never a world rank.
+export function referencePercentile(wpm: number) {
+  const z = (wpm - 51.56) / 20.2;
+  const t = 1 / (1 + 0.3275911 * Math.abs(z) / Math.SQRT2);
+  const erf = 1 - ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-(z * z) / 2);
+  return Math.max(1, Math.min(99, Math.round(100 * (z >= 0 ? (1 + erf) / 2 : (1 - erf) / 2))));
+}
+
 export function timeline(events: KeyEvent[], duration: number): Point[] {
   return Array.from({ length: duration }, (_, second) => {
     const attempts = events.filter((event) => event.kind === "input" && event.time >= second * 1000 && event.time < (second + 1) * 1000);
