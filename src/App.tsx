@@ -254,7 +254,7 @@ const Prompt = memo(function Prompt({ prompt, typed, inputRef, paceStart, paceWp
   </div>;
 });
 
-export default function App() {
+export default function App({ initialPage = "test" }: { initialPage?: Page }) {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const startRef = useRef<number | null>(null);
   const typedRef = useRef("");
@@ -274,7 +274,7 @@ export default function App() {
   const [report, setReport] = useState<Report>();
   const [history, setHistory] = useState<TestResult[]>([]);
   const [traces, setTraces] = useState<Trace[]>([]);
-  const [page, setPage] = useState<Page>("test");
+  const page = initialPage;
   const [selectedHistoryId, setSelectedHistoryId] = useState<string>();
   const [notice, setNotice] = useState("");
   const prompt = useMemo(() => createPrompt(seed, drillTarget), [seed, drillTarget]);
@@ -462,7 +462,7 @@ export default function App() {
   };
 
   return <main className={`${status === "running" ? "focus-mode" : ""} blink-${settings.blink}`} style={{ "--caret-ms": `${caretMs[settings.caretSpeed]}ms` } as CSSProperties}>
-    <header className="topbar"><a className="brand" href="#top" onClick={(event) => { event.preventDefault(); setPage("test"); newTest(); }}>ape typer</a><nav><button className="nav-link" type="button" onClick={() => setPage("test")} aria-current={page === "test" ? "page" : undefined}>test</button><button className="nav-link" type="button" onClick={() => setPage("statistics")} aria-current={page === "statistics" ? "page" : undefined}>statistics</button></nav></header>
+    <header className="topbar"><a className="brand" href="/">ape typer</a><nav><a className="nav-link" href="/" aria-current={page === "test" ? "page" : undefined}>test</a><a className="nav-link" href="/statistics/" aria-current={page === "statistics" ? "page" : undefined}>statistics</a></nav></header>
     <div className="shell" id="top">
       {page === "statistics" ? <Statistics history={history} traces={traces} selectedId={selectedHistoryId} onSelect={setSelectedHistoryId} /> : <>
       {!result ? <section className="test-surface" aria-label="Typing test" onClick={() => inputRef.current?.focus({ preventScroll: true })}>
