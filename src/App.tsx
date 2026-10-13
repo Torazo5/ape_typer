@@ -1,6 +1,6 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react";
 import { calculateResult } from "./lib/analysis";
-import { buildReport, type Report } from "./lib/report";
+import { buildReport, standardDeviation, type Finding, type Report, type Section } from "./lib/report";
 import { clearTraces, getLocalTraces, saveTrace, type Trace } from "./lib/storage";
 import type { KeyEvent, TestDuration, TestResult } from "./lib/types";
 import { createPrompt, spaceAction } from "./lib/words";
@@ -78,36 +78,74 @@ function HistoryChart({ history }: { history: TestResult[] }) {
   </section>;
 }
 
-function ReportTables({ report }: { report: Report }) {
-  return <div className="report-grid">{report.sections.map((section) => <section className="report-section" key={section.title}><h3>{section.title}</h3><dl>{section.rows.map((row) => <div key={row.label}><dt>{row.label}</dt><dd><strong>{row.value}</strong><span>{row.detail}</span></dd></div>)}</dl></section>)}</div>;
+function ReportTables({ sections }: { sections: Section[] }) {
+  return <div className="report-grid">{sections.map((section) => <section className="report-section" key={section.title}><h3>{section.title}</h3><dl>{section.rows.map((row) => <div key={row.label}><dt>{row.label}</dt><dd><strong>{row.value}</strong><span>{row.detail}</span></dd></div>)}</dl></section>)}</div>;
 }
 
+function FindingList({ findings, empty }: { findings: Finding[]; empty: ReactNode }) {
+  const [detailedFinding, setDetailedFinding] = useState<Finding>();
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") setDetailedFinding(undefined); };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, []);
+  if (!findings.length) return <>{empty}</>;
+  return <><div className="finding-list">{findings.map((finding) => <article className="finding" key={finding.title}>
+    <h3>{finding.title}<span className="finding-basis">{finding.basis === "run" ? "this run" : "your history"}</span></h3>
+    <p className="finding-summary"><span>{finding.sample}</span><span>Statistically significant</span></p><p>{finding.advice}</p>
+    <button className="finding-details" type="button" onClick={() => setDetailedFinding(finding)}>See detailed analysis</button>
+  </article>)}</div>
+  {detailedFinding && <div className="analysis-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) setDetailedFinding(undefined); }}><section className="analysis-card" role="dialog" aria-modal="true" aria-labelledby="analysis-card-title"><button className="analysis-close" type="button" aria-label="Close detailed analysis" onClick={() => setDetailedFinding(undefined)}>×</button><p className="eyebrow">Detailed analysis</p><h2 id="analysis-card-title">{detailedFinding.title}</h2><p className="finding-summary"><span>{detailedFinding.sample}</span><span>Statistically significant</span></p>{detailedFinding.details && <dl className="analysis-details">{detailedFinding.details.map((detail) => <div key={detail.label}><dt>{detail.label}</dt><dd><strong>{detail.value}</strong><span>{detail.detail}</span></dd></div>)}</dl>}<p className="finding-evidence">{detailedFinding.evidence}</p></section></div>}</>;
+}
+
+const noFindingYet = <div className="empty-insight"><strong>No statistically significant pattern yet.</strong><span>A finding appears only when its test reaches p &lt; 0.05 after Holm correction and meets its minimum sample size. Saved runs are pooled, so findings get sharper as you keep typing.</span></div>;
+
 function Statistics({ history, traces, selectedId, onSelect }: { history: TestResult[]; traces: Trace[]; selectedId?: string; onSelect: (id: string) => void }) {
-  if (!history.length) return <section className="statistics" aria-label="Typing statistics"><p className="eyebrow">Your data</p><h1>Statistics</h1><p className="muted">Finish a test lasting at least 7 seconds to start building your history.</p></section>;
+  // History-wide patterns are tested once on the pooled traces; the newest detailed run anchors the per-run sections.
+  const overall = useMemo(() => {
+    const latest = traces.find((trace) => trace.events.length);
+    return latest ? buildReport({ events: latest.events, elapsed: latest.result.elapsed ?? latest.result.timeline.length }, traces) : undefined;
+  }, [traces]);
   const selected = history.find((run) => run.id === selectedId) ?? history[0];
-  const selectedTrace = traces.find((trace) => trace.id === selected.id);
-  const runReport = selectedTrace?.events.length ? buildReport({ events: selectedTrace.events, elapsed: selected.elapsed ?? selected.timeline.length }, traces) : undefined;
+  const runReport = useMemo(() => {
+    const trace = selected && traces.find((item) => item.id === selected.id);
+    return trace?.events.length ? buildReport({ events: trace.events, elapsed: selected.elapsed ?? selected.timeline.length }, traces) : undefined;
+  }, [selected, traces]);
+  if (!selected) return <section className="statistics" aria-label="Typing statistics"><p className="eyebrow">Your data</p><h1>Statistics</h1><p className="muted">Finish a test lasting at least 7 seconds to start building your history.</p></section>;
   const averageWpm = history.reduce((sum, run) => sum + run.netWpm, 0) / history.length;
   const averageAccuracy = history.reduce((sum, run) => sum + run.accuracy, 0) / history.length;
   const bestWpm = Math.max(...history.map((run) => run.netWpm));
+  const wpmDeviation = standardDeviation(history.map((run) => run.netWpm));
+  const accuracyDeviation = standardDeviation(history.map((run) => run.accuracy));
   return <section className="statistics" aria-label="Typing statistics">
     <div className="section-heading"><div><p className="eyebrow">Your data</p><h1>Statistics</h1></div><span className="pill">{history.length} saved {history.length === 1 ? "run" : "runs"}</span></div>
-    <div className="stat-summary">
-      <div><span>average</span><strong>{averageWpm.toFixed(1)}<small> wpm</small></strong></div>
-      <div><span>best</span><strong>{bestWpm}<small> wpm</small></strong></div>
-      <div><span>accuracy</span><strong>{averageAccuracy.toFixed(1)}<small>%</small></strong></div>
-    </div>
-    {history.length > 1 && <HistoryChart history={history} />}
-    <div className="statistics-detail">
+    <section className="overall-statistics" aria-label="All saved typing statistics">
+      <div className="section-heading"><div><p className="eyebrow">All saved runs</p><h2>Overall statistics</h2></div></div>
+      <div className="stat-summary">
+        <div><span>average</span><strong>{averageWpm.toFixed(1)}<small> wpm</small></strong><em>{history.length > 1 ? `± ${wpmDeviation.toFixed(1)} wpm std. dev.` : "Add another run for spread"}</em></div>
+        <div><span>best</span><strong>{bestWpm}<small> wpm</small></strong><em>Fastest of {history.length} saved {history.length === 1 ? "run" : "runs"}</em></div>
+        <div><span>accuracy</span><strong>{averageAccuracy.toFixed(1)}<small>%</small></strong><em>{history.length > 1 ? `± ${accuracyDeviation.toFixed(1)}% std. dev.` : "Add another run for spread"}</em></div>
+      </div>
+      <section className="history-findings"><div className="section-heading"><div><p className="eyebrow">Letter patterns and progress</p><h2>Findings</h2></div>{overall && <span className="pill">{overall.scope}</span>}</div>
+        <FindingList findings={overall?.findings.filter((finding) => finding.basis === "history") ?? []} empty={noFindingYet} />
+        {overall && <ReportTables sections={overall.sections.filter((section) => section.title === "History")} />}
+      </section>
+      {history.length > 1 && <HistoryChart history={history} />}
+    </section>
+    <section className="individual-runs"><div className="section-heading"><div><p className="eyebrow">Individual runs</p><h2>Run details</h2></div></div><div className="statistics-detail">
       <section className="run-list" aria-label="Past typing runs"><h2>Past runs</h2>{history.map((run) => <button className={run.id === selected.id ? "selected" : ""} type="button" key={run.id} onClick={() => onSelect(run.id)} aria-pressed={run.id === selected.id}><strong>{run.netWpm} <small>wpm</small></strong><span>{run.accuracy}% acc · {run.timeline.length}s</span><time>{new Date(run.createdAt).toLocaleString()}</time></button>)}</section>
       <section className="run-detail" aria-label="Selected typing run"><div className="section-heading"><div><p className="eyebrow">Selected run</p><h2>{new Date(selected.createdAt).toLocaleString()}</h2></div></div><LineChart result={selected} />
         <dl className="run-metrics">
           <div><dt>raw speed</dt><dd>{selected.rawWpm} wpm</dd></div><div><dt>consistency</dt><dd>{selected.consistency}%</dd></div><div><dt>correct</dt><dd>{selected.characters.correct}</dd></div><div><dt>incorrect</dt><dd>{selected.characters.incorrect}</dd></div><div><dt>missed</dt><dd>{selected.characters.missed}</dd></div><div><dt>corrections</dt><dd>{selected.corrections}</dd></div>
         </dl>
-        {selected.insights.length > 0 && <div className="run-insights"><h3>Run signals</h3>{selected.insights.map((insight) => <p key={insight.title}><strong>{insight.title}</strong>{insight.detail}</p>)}</div>}
-        <section className="historical-analysis"><div className="section-heading"><div><p className="eyebrow">Keystroke analysis</p><h3>Speed, accuracy, and rhythm</h3></div>{runReport && <span className="pill">{runReport.scope}</span>}</div>{runReport ? <ReportTables report={runReport} /> : <p className="muted">This older run retains its summary, but detailed keystrokes are kept only for the newest 50 saved runs.</p>}</section>
+        <section className="historical-analysis"><div className="section-heading"><div><p className="eyebrow">This run only</p><h3>Speed, accuracy, and rhythm</h3></div></div>
+          {runReport ? <>
+            <FindingList findings={runReport.findings.filter((finding) => finding.basis === "run")} empty={<p className="muted">No significant rhythm pattern in this run.</p>} />
+            <ReportTables sections={runReport.sections.filter((section) => section.title !== "History")} />
+          </> : <p className="muted">This older run keeps its summary, but detailed keystrokes are kept only for the newest 50 saved runs.</p>}
+        </section>
       </section>
-    </div>
+    </div></section>
   </section>;
 }
 
@@ -436,8 +474,8 @@ export default function App() {
         <div className="result-layout"><div className="score-stack"><div><span>wpm</span><strong>{result.netWpm}</strong></div><div><span>acc</span><strong>{result.accuracy}<small>%</small></strong></div></div><LineChart result={result} /></div>
         <div className="result-details"><div><span>test type</span><strong>time {result.duration}<small>s</small></strong><em>english</em></div><div><span>raw</span><strong>{result.rawWpm}</strong></div><div><span>characters</span><strong>{result.characters.correct}/{result.characters.incorrect}/{result.characters.extra}/{result.characters.missed}</strong></div><div><span>consistency</span><strong>{result.consistency}<small>%</small></strong></div><div><span>time</span><strong>{result.timeline.length}<small>s</small></strong></div></div>
         <section className="insights"><div className="section-heading"><div><p className="eyebrow">Statistical readout</p><h2>Findings</h2></div>{report && <span className="pill">{report.scope}</span>}</div>
-          {report?.findings.length ? <div className="finding-list">{report.findings.map((finding) => <article className="finding" key={finding.title}><h3>{finding.title}</h3><p className="finding-evidence">{finding.evidence}</p><p>{finding.advice}</p></article>)}</div> : <div className="empty-insight"><strong>No statistically significant pattern yet.</strong><span>A finding appears only when its test reaches p &lt; 0.05 after Holm correction and meets its minimum sample size. Saved tests are pooled, so findings get sharper as you keep typing.</span></div>}
-          {report && <ReportTables report={report} />}
+          {report && <FindingList findings={report.findings} empty={noFindingYet} />}
+          {report && <ReportTables sections={report.sections} />}
         </section>
         <div className="result-actions"><button className="text-action" onClick={() => newTest()}>↻ retry</button><button className="text-action" onClick={() => newTest(report?.findings.find((finding) => finding.target)?.target ?? result.drillTarget)}>⌁ practice weak spot</button></div>
       </section>}

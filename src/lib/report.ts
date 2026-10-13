@@ -8,6 +8,7 @@ const MIN_FLOW = 30;
 const MIN_CHARACTER_ATTEMPTS = 20;
 const MIN_BIGRAM = 8;
 const MIN_GROUP = 8;
+const MIN_MIXUPS = 3;
 const MIN_TESTS_FOR_TREND = 5;
 const ALPHA = 0.05;
 
@@ -19,6 +20,12 @@ export function quantile(sorted: number[], q: number) {
   return sorted[lower] + (sorted[upper] - sorted[lower]) * (position - lower);
 }
 export const median = (values: number[]) => quantile([...values].sort((a, b) => a - b), 0.5);
+/** Sample standard deviation, using n - 1 so saved runs estimate the wider pattern. */
+export function standardDeviation(values: number[]) {
+  if (values.length < 2) return 0;
+  const average = values.reduce((sum, value) => sum + value, 0) / values.length;
+  return Math.sqrt(values.reduce((sum, value) => sum + (value - average) ** 2, 0) / (values.length - 1));
+}
 const mad = (values: number[], center: number) => median(values.map((value) => Math.abs(value - center)));
 
 /** Wilson score interval for a binomial proportion. */
@@ -141,9 +148,11 @@ function replay(events: KeyEvent[]) {
 
 export type Row = { label: string; value: string; detail: string };
 export type Section = { title: string; rows: Row[] };
-export type Finding = { title: string; evidence: string; advice: string; target?: string };
+/** `basis` says whether a finding was tested on this run alone or on pooled history. */
+export type Finding = { title: string; sample: string; evidence: string; details?: Row[]; advice: string; target?: string; basis: "run" | "history" };
 export type Report = { scope: string; sections: Section[]; findings: Finding[] };
-type Candidate = { p: number; rank: number; build: (adjustedP: number) => Finding };
+/** `key` + `specific` let a significant mix-up replace the general error-rate finding for the same key. */
+type Candidate = { p: number; rank: number; basis: Finding["basis"]; key?: string; specific?: boolean; build: (adjustedP: number) => Omit<Finding, "basis"> };
 
 const show = (character: string) => (character === " " ? "␣" : character);
 const percent = (value: number) => `${(value * 100).toFixed(1)}%`;
@@ -225,8 +234,9 @@ export function buildReport(current: { events: KeyEvent[]; elapsed: number }, tr
     const test = mannWhitney(boundary, inWord);
     const difference = median(boundary) - median(inWord);
     rhythm.push({ label: "word-start cost", value: signedMs(difference), detail: `first letter ${ms(median(boundary))} vs in-word ${ms(median(inWord))} · ${pText(test.p)}` });
-    candidates.push({ p: test.p, rank: test.effect, build: (adjustedP) => ({
+    candidates.push({ p: test.p, rank: test.effect, basis: "run", build: (adjustedP) => ({
       title: "You hesitate at the start of each word",
+      sample: `${boundary.length} word starts and ${inWord.length} in-word intervals`,
       evidence: `First-letter interval ${ms(median(boundary))} vs ${ms(median(inWord))} inside words (n = ${boundary.length}/${inWord.length}) · P(slower) = ${test.effect.toFixed(2)} · Mann–Whitney ${pText(adjustedP)} (Holm)`,
       advice: "Read one word ahead so the next word is loaded before you finish the current one.",
     }) });
@@ -236,8 +246,9 @@ export function buildReport(current: { events: KeyEvent[]; elapsed: number }, tr
   if (afterError.length >= MIN_GROUP && flow.length >= MIN_FLOW) {
     const test = mannWhitney(afterError, flowGaps);
     rhythm.push({ label: "post-error slowing", value: signedMs(median(afterError) - flowMedian), detail: `next key after an uncorrected error ${ms(median(afterError))} (n = ${afterError.length}) · ${pText(test.p)}` });
-    candidates.push({ p: test.p, rank: test.effect, build: (adjustedP) => ({
+    candidates.push({ p: test.p, rank: test.effect, basis: "run", build: (adjustedP) => ({
       title: "Errors break your rhythm",
+      sample: `${afterError.length} post-error intervals`,
       evidence: `Key after an error ${ms(median(afterError))} vs ${ms(flowMedian)} baseline (n = ${afterError.length}) · P(slower) = ${test.effect.toFixed(2)} · Mann–Whitney ${pText(adjustedP)} (Holm)`,
       advice: "Decide in advance: either fix errors immediately or keep going. Hesitating between the two costs the most.",
     }) });
@@ -247,10 +258,10 @@ export function buildReport(current: { events: KeyEvent[]; elapsed: number }, tr
   // Older runs keep only their summary; they count toward the speed trend but not the pooled keystroke tests.
   const pooledTraces = traces.filter((trace) => trace.events.length);
   const pooledInputs = pooledTraces.flatMap((trace) => trace.events.filter((event) => event.kind === "input"));
-  const relativeFlow = pooledTraces.flatMap((trace) => {
+  const relativeFlow = pooledTraces.flatMap((trace, run) => {
     const traceFlow = transitions(trace.events).filter(isFlow);
     const traceMedian = median(traceFlow.map((entry) => entry.gap));
-    return traceMedian ? traceFlow.map((entry) => ({ bigram: entry.previous.expected + entry.event.expected, relative: entry.gap / traceMedian })) : [];
+    return traceMedian ? traceFlow.map((entry) => ({ bigram: entry.previous.expected + entry.event.expected, character: entry.event.expected, gap: entry.gap, relative: entry.gap / traceMedian, run })) : [];
   });
 
   const byCharacter = new Map<string, KeyEvent[]>();
@@ -271,11 +282,38 @@ export function buildReport(current: { events: KeyEvent[]; elapsed: number }, tr
     const confusions = new Map<string, number>();
     for (const error of errors) confusions.set(error.actual, (confusions.get(error.actual) ?? 0) + 1);
     const [topActual, topCount] = [...confusions.entries()].sort((a, b) => b[1] - a[1])[0] ?? ["", 0];
-    candidates.push({ p, rank: rate / Math.max(baseline, 1e-4), build: (adjustedP) => ({
+    candidates.push({ p, rank: rate / Math.max(baseline, 1e-4), basis: "history", key: character, build: (adjustedP) => ({
       title: `“${show(character)}” fails ${(rate / Math.max(baseline, 1e-4)).toFixed(1)}× more often than other keys`,
+      sample: `${attempts.length} attempts at “${show(character)}”`,
       evidence: `${errors.length}/${attempts.length} wrong (${percent(rate)}, 95% CI ${percent(low)}–${percent(high)}) vs ${percent(baseline)} elsewhere · exact binomial ${pText(adjustedP)} (Holm)${topCount ? ` · most often typed as “${show(topActual)}” (${topCount}/${errors.length})` : ""}`,
       advice: character === " " ? "You often type a letter where the space belongs: finish each word fully before moving on." : `Practice words containing “${character}” at a slower, accurate pace before speeding up.`,
       target: character === " " ? undefined : character,
+    }) });
+  }
+
+  // Mix-ups: is typing X for Y more common than typing X by mistake anywhere else?
+  const mixups = new Map<string, KeyEvent[]>();
+  for (const event of pooledInputs) if (!event.correct) mixups.set(`${event.expected}\u0000${event.actual}`, [...(mixups.get(`${event.expected}\u0000${event.actual}`) ?? []), event]);
+  let topMixup: { expected: string; actual: string; count: number; attempts: number } | undefined;
+  for (const [key, events] of mixups) {
+    const [expected, actual] = key.split("\u0000");
+    const attempts = byCharacter.get(expected)?.length ?? 0;
+    if (!topMixup || events.length > topMixup.count) topMixup = { expected, actual, count: events.length, attempts };
+    if (events.length < MIN_MIXUPS || attempts < MIN_CHARACTER_ATTEMPTS) continue;
+    // Null rate: how often `actual` shows up as a wrong key when something other than `expected` (or itself) was due.
+    const otherAttempts = pooledInputs.length - attempts - (byCharacter.get(actual)?.length ?? 0);
+    const strayElsewhere = pooledInputs.filter((event) => !event.correct && event.actual === actual && event.expected !== expected).length;
+    const baseline = (strayElsewhere + 1) / (Math.max(0, otherAttempts) + 2);
+    const rate = events.length / attempts;
+    if (rate <= baseline) continue;
+    const p = binomialTail(events.length, attempts, baseline);
+    const [low, high] = wilson(events.length, attempts);
+    candidates.push({ p, rank: rate / baseline, basis: "history", key: expected, specific: true, build: (adjustedP) => ({
+      title: `Mix-up: you type “${show(actual)}” for “${show(expected)}”`,
+      sample: `${attempts} attempts at “${show(expected)}”`,
+      evidence: `${events.length}/${attempts} attempts at “${show(expected)}” came out as “${show(actual)}” (${percent(rate)}, 95% CI ${percent(low)}–${percent(high)}) vs ${percent(baseline)} stray “${show(actual)}” elsewhere (add-one smoothed) · exact binomial ${pText(adjustedP)} (Holm)`,
+      advice: expected === " " ? `You type “${actual}” where a word should end: finish each word before reaching for the next.` : `Type words with “${expected}” slowly enough to feel the difference from “${actual}”, then build speed.`,
+      target: expected === " " ? undefined : expected,
     }) });
   }
 
@@ -290,9 +328,23 @@ export function buildReport(current: { events: KeyEvent[]; elapsed: number }, tr
     // Ignore effects too small to practice, even when a large sample makes them significant.
     if (ratio < 1.15) continue;
     const test = mannWhitney(values, relativeAll);
-    candidates.push({ p: test.p, rank: ratio, build: (adjustedP) => ({
-      title: `Slow transition “${show(bigram[0])}${show(bigram[1])}”`,
+    const samples = relativeFlow.filter((entry) => entry.bigram === bigram);
+    const targetAttempts = byCharacter.get(bigram[1]) ?? [];
+    const targetErrors = targetAttempts.filter((event) => !event.correct).length;
+    const related = new Map<string, number>();
+    for (const entry of relativeFlow.filter((item) => item.character === bigram[1])) related.set(entry.bigram, (related.get(entry.bigram) ?? 0) + 1);
+    const relatedExamples = [...related.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4).map(([pair, count]) => `“${show(pair[0])}${show(pair[1])}” (${count})`).join(" · ");
+    const runCount = new Set(samples.map((entry) => entry.run)).size;
+    candidates.push({ p: test.p, rank: ratio, basis: "history", build: (adjustedP) => ({
+      title: `Slow transition “${show(bigram[0])}${show(bigram[1])}” · ${ratio.toFixed(2)}× your median interval`,
+      sample: `${values.length} transitions`,
       evidence: `${ratio.toFixed(2)}× your median interval for that test (n = ${values.length}) · P(slower) = ${test.effect.toFixed(2)} · Mann–Whitney ${pText(adjustedP)} (Holm)`,
+      details: [
+        { label: "time on this pair", value: ms(median(samples.map((entry) => entry.gap))), detail: `${Math.round((ratio - 1) * 100)}% slower than your typical clean interval` },
+        { label: `errors on “${show(bigram[1])}”`, value: targetAttempts.length ? percent(targetErrors / targetAttempts.length) : "—", detail: `${targetErrors}/${targetAttempts.length} attempts were wrong` },
+        { label: "examples reaching this key", value: relatedExamples || "—", detail: "clean transitions ending on this key" },
+        { label: "run coverage", value: `${runCount}/${pooledTraces.length} detailed runs`, detail: runCount === 1 ? "all evidence is from one run; repeat it before treating it as a habit" : "appears across multiple runs, reducing one-test noise" },
+      ],
       advice: `Drill words containing “${bigram}” until the two keys come out as one motion.`,
       target: bigram.includes(" ") ? undefined : bigram,
     }) });
@@ -302,6 +354,9 @@ export function buildReport(current: { events: KeyEvent[]; elapsed: number }, tr
   history.push(worstCharacter
     ? { label: "most error-prone key", value: `“${show(worstCharacter.character)}” ${percent(worstCharacter.rate)}`, detail: `n = ${worstCharacter.n} attempts · overall ${percent(totalWrong / Math.max(1, pooledInputs.length))}` }
     : notEnough("most error-prone key", `${MIN_CHARACTER_ATTEMPTS} attempts on one key`));
+  history.push(topMixup
+    ? { label: "most common mix-up", value: `“${show(topMixup.actual)}” for “${show(topMixup.expected)}”`, detail: `${topMixup.count} time${topMixup.count === 1 ? "" : "s"} in ${topMixup.attempts} attempt${topMixup.attempts === 1 ? "" : "s"} at “${show(topMixup.expected)}”` }
+    : { label: "most common mix-up", value: "—", detail: "no wrong keys in pooled runs" });
   history.push(slowestBigram
     ? { label: "slowest transition", value: `“${show(slowestBigram.bigram[0])}${show(slowestBigram.bigram[1])}” ${slowestBigram.ratio.toFixed(2)}×`, detail: `median relative to each test's typical interval · n = ${slowestBigram.n}` }
     : notEnough("slowest transition", `${MIN_BIGRAM} clean samples of one letter pair`));
@@ -313,12 +368,13 @@ export function buildReport(current: { events: KeyEvent[]; elapsed: number }, tr
   } else history.push(notEnough("speed trend", `${MIN_TESTS_FOR_TREND} saved tests, have ${chronological.length}`));
 
   const adjusted = holm(candidates.map((candidate) => candidate.p));
-  const findings = candidates
-    .map((candidate, index) => ({ candidate, adjustedP: adjusted[index] }))
-    .filter(({ adjustedP }) => adjustedP < ALPHA)
+  const significant = candidates.map((candidate, index) => ({ candidate, adjustedP: adjusted[index] })).filter(({ adjustedP }) => adjustedP < ALPHA);
+  const explainedKeys = new Set(significant.filter(({ candidate }) => candidate.specific).map(({ candidate }) => candidate.key));
+  const findings = significant
+    .filter(({ candidate }) => candidate.specific || !candidate.key || !explainedKeys.has(candidate.key))
     .sort((a, b) => a.adjustedP - b.adjustedP || b.candidate.rank - a.candidate.rank)
     .slice(0, 6)
-    .map(({ candidate, adjustedP }) => candidate.build(adjustedP));
+    .map(({ candidate, adjustedP }) => ({ ...candidate.build(adjustedP), basis: candidate.basis }));
 
   return {
     scope: `${candidates.length} tests run · α = ${ALPHA} (Holm)`,
